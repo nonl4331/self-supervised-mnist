@@ -1,0 +1,6 @@
+[env]
+# LLM generated fix for ROCm on my system:
+# hipconfig on this system reports "7.16.0-0000000" (no real patch number), so
+# cubecl-hip-sys can't pick its HIP bindings and builds with none at all.
+# Pin it to the newest bindings that cubecl-hip-sys ships.
+CUBECL_HIP_SYS_HIP_VERSION_OVERRIDE = "60850"

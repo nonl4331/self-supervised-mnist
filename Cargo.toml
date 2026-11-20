@@ -3,5 +3,17 @@ name = "self-supervised-mnist"
 version = "0.1.0"
 edition = "2024"
 
+
+[features]
+default = []
+wgpu = ["burn/wgpu"]
+metal = ["burn/metal"]
+cuda = ["burn/cuda"]
+vulkan = ["burn/vulkan"]
+rocm = ["burn/rocm"]
+cubecl = ["burn/cubecl"]
+
 [dependencies]
-burn = "0.22.1"
+burn = {version = "0.22.1", features = ["dataset", "vision", "train", "flex"]}
+# Temporary pin: systemstat 0.2.8 made Linux PlatformImpl !Sync, breaking burn-train's CpuTemperature metric.
+systemstat = "=0.2.7"

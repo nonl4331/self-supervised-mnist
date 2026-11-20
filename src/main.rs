@@ -2,7 +2,7 @@ mod model;
 mod training;
 mod data;
 
-use burn::tensor::{Device};
+use burn::tensor::{Device, DeviceKind, DeviceIndex};
 
 fn select_device() -> Device {
     #[cfg(feature = "vulkan")]

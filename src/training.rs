@@ -1,9 +1,16 @@
 use burn::{
     data::{
-        dataloader::DataLoaderBuilder, dataset::{transform::PartialDataset, vision::{MnistDataset, MnistItem}},
-    }, optim::{AdamConfig, GradientsParams}, prelude::*, train::{ClassificationOutput, InferenceStep, Learner, SupervisedTraining, TrainOutput, TrainStep, metric::{AccuracyMetric, IterationSpeedMetric, LossMetric}},
+        dataloader::DataLoaderBuilder,
+        dataset::{
+            transform::PartialDataset,
+            vision::{MnistDataset, MnistItem},
+        },
+    }, module::ModuleDisplay, optim::{AdamConfig, GradientsParams}, prelude::*, train::{
+        ClassificationOutput, InferenceStep, Learner, SupervisedTraining, TrainOutput, TrainStep,
+        metric::{AccuracyMetric, IterationSpeedMetric, LossMetric},
+    },
 };
-use std::{fs, sync::Arc};
+use std::sync::Arc;
 
 use crate::{
     data::{MnistBatch, MnistBatcher},
@@ -16,7 +23,7 @@ const ARTIFACT_DIR: &str = "/tmp/ssm";
 pub struct TrainingConf {
     #[config(default = 50)]
     pub num_epochs: usize,
-    #[config(defualt = 256)]
+    #[config(defualt = 1024)]
     pub batch_size: usize,
     #[config(default = 8)]
     pub num_workers: usize,
@@ -32,12 +39,16 @@ pub fn run(device: Device) {
     let autodiff_device = device.clone().autodiff();
 
     //let model = Model::new(&autodiff_device);
-    let mut model2_backbone = Model2Backbone::new(&autodiff_device);
+    let model2a_backbone = Model2Backbone::new(&autodiff_device);
+    let model2b_backbone = Model2Backbone::new(&autodiff_device);
+    let mut model2_backbone = JointEmbeddingModel::new(model2a_backbone, model2b_backbone);
     //let mut model2 = Model2::new(&autodiff_device);
 
     let dataset = Arc::new(MnistDataset::train());
-    let dataset_train: PartialDataset<Arc<_>, MnistItem> = PartialDataset::new(dataset.clone(), 0, 55000);
-    let dataset_val: PartialDataset<Arc<_>, MnistItem> = PartialDataset::new(dataset.clone(), 55000, 60000);
+    let dataset_train: PartialDataset<Arc<_>, MnistItem> =
+        PartialDataset::new(dataset.clone(), 0, 55000);
+    let dataset_val: PartialDataset<Arc<_>, MnistItem> =
+        PartialDataset::new(dataset.clone(), 55000, 60000);
     let dataset_test = MnistDataset::test();
 
     let dataloader_train = DataLoaderBuilder::new(MnistBatcher::default())
@@ -67,12 +78,11 @@ pub fn run(device: Device) {
     println!("doing pretraining");
     // joint embedding pretraining of backbone
     let mut optim = conf.optim.init();
-    for epoch in 1..conf.num_epochs+1 {
+    for epoch in 1..conf.num_epochs + 1 {
         for (iter, batch) in dataloader_train.iter().map(Result::unwrap).enumerate() {
             let corr = corrupt_batch(batch.images.clone());
 
-            let za = model2_backbone.forward(batch.images);
-            let zb = model2_backbone.forward(corr);
+            let (za, zb) = model2_backbone.out(batch.images, corr);
 
             let (av, am) = za.clone().var_mean(0);
             let za_norm = (za - am) / av.sqrt();
@@ -82,24 +92,34 @@ pub fn run(device: Device) {
 
             let cross_corr = za_norm.t().matmul(zb_norm) / conf.batch_size as f32;
 
-            let c_diff = cross_corr - Tensor::eye(10, &device);
-            let c_diff = c_diff.clone().matmul(c_diff);
+            let c_diff = (cross_corr - Tensor::eye(10, &autodiff_device)).powi_scalar(2);
 
             // assume lambda = 1
             let loss = c_diff.sum();
             let grads = loss.backward();
+            println!("epoch {epoch} | iter {iter} | loss: {:.5}", loss.into_scalar::<f32>());
+
             let grads = GradientsParams::from_grads(grads, &model2_backbone);
             model2_backbone = optim.step(1e-3, model2_backbone, grads);
         }
+        println!("epoch {epoch} done");
     }
     println!("finished pretraining");
 
-    let mut model2 = Model2::new(&autodiff_device, model2_backbone);
+    let mut model2 = JointEmbeddingPredictor::new(&autodiff_device, model2_backbone);
     model2.backbone = model2.backbone.freeze();
 
     // linear probe
-    let training = SupervisedTraining::new(ARTIFACT_DIR, dataloader_train, dataloader_val).metrics((AccuracyMetric::new(), LossMetric::new(), IterationSpeedMetric::new())).with_default_checkpointers().num_epochs(conf.num_epochs).summary();
-    let result = training.launch(Learner::new(model2, conf.optim.init(), 1e-3));
+    let training = SupervisedTraining::new(ARTIFACT_DIR, dataloader_train, dataloader_val)
+        .metrics((
+            AccuracyMetric::new(),
+            LossMetric::new(),
+            IterationSpeedMetric::new(),
+        ))
+        .with_default_checkpointers()
+        .num_epochs(conf.num_epochs)
+        .summary();
+    let _result = training.launch(Learner::new(model2, conf.optim.init(), 1e-3));
 }
 
 fn corrupt_batch(batch: Tensor<3>) -> Tensor<3> {
@@ -109,7 +129,7 @@ fn corrupt_batch(batch: Tensor<3>) -> Tensor<3> {
     batch * mask
 }
 
-impl TrainStep for Model {
+impl TrainStep for MnistMLPBaseline {
     type Input = MnistBatch;
     type Output = ClassificationOutput;
 
@@ -120,7 +140,7 @@ impl TrainStep for Model {
     }
 }
 
-impl InferenceStep for Model {
+impl InferenceStep for MnistMLPBaseline {
     type Input = MnistBatch;
     type Output = ClassificationOutput;
 
@@ -129,7 +149,7 @@ impl InferenceStep for Model {
     }
 }
 
-impl TrainStep for Model2 {
+impl<M: Module + ModelForward + ModuleDisplay> TrainStep for JointEmbeddingPredictor<M> {
     type Input = MnistBatch;
     type Output = ClassificationOutput;
 
@@ -140,7 +160,7 @@ impl TrainStep for Model2 {
     }
 }
 
-impl InferenceStep for Model2 {
+impl<M: Module + ModelForward + ModuleDisplay> InferenceStep for JointEmbeddingPredictor<M> {
     type Input = MnistBatch;
     type Output = ClassificationOutput;
 
